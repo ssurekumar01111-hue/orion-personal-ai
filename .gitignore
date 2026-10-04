@@ -1,0 +1,15 @@
+.env
+.env.*
+.venv/
+data/
+__pycache__/
+*.pyc
+node_modules/
+dist/
+.vite/
+.pytest_cache/
+backend/orion.db
+backend/.pytest_cache/
+frontend/node_modules/
+frontend/dist/
+orion-5b-confirmation-test.txt

@@ -3,6 +3,7 @@ import { ProviderType } from '../../types/api';
 import { StatusDot } from '../common/StatusDot';
 import {
   Cpu,
+  LogOut,
   PanelLeft,
   PanelRight,
 } from 'lucide-react';
@@ -15,6 +16,8 @@ interface HeaderProps {
   activeSessionTitle?: string;
   onToggleLeftSidebar: () => void;
   onToggleRightSidebar: () => void;
+  onSignOut?: () => void;
+  isAuthenticated?: boolean;
   className?: string;
 }
 
@@ -26,6 +29,8 @@ export const Header: React.FC<HeaderProps> = ({
   activeSessionTitle = 'Current Session',
   onToggleLeftSidebar,
   onToggleRightSidebar,
+  onSignOut,
+  isAuthenticated = false,
   className = '',
 }) => {
   return (
@@ -86,6 +91,19 @@ export const Header: React.FC<HeaderProps> = ({
             {isOnline ? 'ONLINE' : 'OFFLINE'}
           </span>
         </div>
+
+        {/* Demo Sign Out Button */}
+        {isAuthenticated && onSignOut && (
+          <button
+            type="button"
+            onClick={onSignOut}
+            className="p-1.5 rounded-lg text-slate-400 hover:text-rose-300 hover:bg-slate-800/80 transition-colors"
+            title="Lock Demo / Sign Out"
+            data-testid="sign-out-button"
+          >
+            <LogOut className="w-4 h-4" />
+          </button>
+        )}
 
         {/* Right context sidebar toggle on mobile */}
         <button

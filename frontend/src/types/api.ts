@@ -41,6 +41,7 @@ export interface AgentRunResponsePayload {
 export interface ConfirmRequestPayload {
   confirmation_id: string;
   approved: boolean;
+  session_id?: string | null;
 }
 
 export interface ConfirmResponsePayload {

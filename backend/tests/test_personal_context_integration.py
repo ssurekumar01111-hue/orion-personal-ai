@@ -338,7 +338,10 @@ class TestPersonalContextIntegration(unittest.TestCase):
     # ── 12. /api/chat benefits from Personal Model context ────────────────────
     def test_12_api_chat_benefits_from_personal_model_context(self):
         proj = self.personal_store.create_project(name="API Chat Proj")
-        client = TestClient(app)
+        client = TestClient(
+            app,
+            headers={"Authorization": f"Bearer {os.environ.get('ORION_DEMO_KEY', 'test-demo-secret-key-12345-very-long')}"},
+        )
 
         with patch("app.main.router.chat", new_callable=AsyncMock) as mock_chat:
             mock_chat.return_value = {

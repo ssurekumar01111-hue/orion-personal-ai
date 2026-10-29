@@ -1,6 +1,16 @@
 import json
-from fastapi import FastAPI, HTTPException
+import os
+import secrets
+from contextlib import asynccontextmanager
+from pathlib import Path
+from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi.responses import FileResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+
+from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
+from fastapi.openapi.utils import get_openapi
 
 from .config import get_settings
 from .memory import (
@@ -10,12 +20,21 @@ from .memory import (
     PersonalModelStore,
     SessionStore,
     initialize_database,
+    seed_demo_data,
+    _is_test_environment,
 )
 from .providers import ModelRouter, NebiusProvider, HermesProvider
+from .rate_limiter import (
+    check_auth_attempts,
+    check_expensive_rate_limit,
+    record_auth_failure,
+)
 from .agents import AgentOrchestrator
 from .tools import ConfirmationStore, create_default_registry
 from .tools.audit import log_event
+from .tools.permissions import DEFAULT_TOOL_PERMISSIONS, Permission
 from .tools.planner import ToolPlanner
+from .tools.workspace import PROJECT_ROOT, _ensure_demo_workspace
 
 
 settings = get_settings()
@@ -53,11 +72,111 @@ orchestrator = AgentOrchestrator(
     confirmation_store=confirmation_store,
 )
 
+bearer_scheme = HTTPBearer(auto_error=False)
+PUBLIC_PATHS = {"/health", "/health/", "/", "", "/favicon.svg"}
+
+
+async def verify_demo_auth(
+    request: Request,
+    auth: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+) -> str | None:
+    if request.url.path in PUBLIC_PATHS or request.url.path.startswith("/assets/"):
+        return None
+
+    check_auth_attempts(request)
+
+    app_settings = get_settings()
+    configured_key = app_settings.orion_demo_key
+
+    if not configured_key or not configured_key.strip():
+        record_auth_failure(request)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication failed: ORION_DEMO_KEY is not configured.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    if auth is None or not auth.credentials:
+        record_auth_failure(request)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing authentication credentials.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    if not secrets.compare_digest(
+        auth.credentials.encode("utf-8"),
+        configured_key.strip().encode("utf-8"),
+    ):
+        record_auth_failure(request)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication credentials.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    return auth.credentials
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    curr_settings = get_settings()
+    if curr_settings.environment.lower() in ("production", "prod"):
+        if not curr_settings.orion_demo_key or not curr_settings.orion_demo_key.strip():
+            raise RuntimeError("ORION_DEMO_KEY must be set in production mode.")
+        if len(curr_settings.orion_demo_key.strip()) < 32:
+            raise RuntimeError("ORION_DEMO_KEY must be at least 32 characters in production mode.")
+        if not curr_settings.nebius_api_key or not curr_settings.nebius_api_key.strip():
+            raise RuntimeError("NEBIUS_API_KEY must be set in production mode.")
+    # Initialise the dedicated workspace with demo files (idempotent).
+    _ensure_demo_workspace()
+    # Seed synthetic demo records if database is empty on fresh instances (non-test environment)
+    if not _is_test_environment():
+        seed_demo_data(force=False)
+    yield
+
+
 app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
     description="Orion — Your Personal AI Operating Layer",
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+    dependencies=[Depends(verify_demo_auth)],
 )
+
+# Production frontend bundle path
+FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"
+ASSETS_DIR = FRONTEND_DIST / "assets"
+if ASSETS_DIR.exists():
+    app.mount("/assets", StaticFiles(directory=str(ASSETS_DIR)), name="assets")
+
+
+@app.get("/favicon.svg", include_in_schema=False)
+async def favicon():
+    fav = FRONTEND_DIST / "favicon.svg"
+    if fav.exists():
+        return FileResponse(fav, media_type="image/svg+xml")
+    raise HTTPException(status_code=404, detail="Favicon not found")
+
+
+@app.get("/openapi.json", include_in_schema=False)
+async def get_openapi_endpoint(auth: str | None = Depends(verify_demo_auth)):
+    return get_openapi(title=app.title, version=app.version, routes=app.routes)
+
+
+@app.get("/docs", include_in_schema=False)
+async def get_documentation(auth: str | None = Depends(verify_demo_auth)):
+    return get_swagger_ui_html(openapi_url="/openapi.json", title=f"{app.title} - Swagger UI")
+
+
+@app.get("/redoc", include_in_schema=False)
+async def get_redoc_documentation(auth: str | None = Depends(verify_demo_auth)):
+    return get_redoc_html(openapi_url="/openapi.json", title=f"{app.title} - ReDoc")
+
+
 
 
 class ChatRequest(BaseModel):
@@ -89,6 +208,9 @@ async def health():
 
 @app.get("/")
 async def root():
+    index_file = FRONTEND_DIST / "index.html"
+    if index_file.exists():
+        return FileResponse(index_file)
     return {
         "name": settings.app_name,
         "version": settings.app_version,
@@ -164,7 +286,7 @@ async def delete_session(session_id: str):
     }
 
 
-@app.post("/api/chat")
+@app.post("/api/chat", dependencies=[Depends(check_expensive_rate_limit)])
 async def chat(request: ChatRequest):
     try:
         session_id = request.session_id
@@ -333,7 +455,7 @@ async def list_tools():
     return {"tools": tools.list_tools()}
 
 
-@app.post("/api/tools/plan")
+@app.post("/api/tools/plan", dependencies=[Depends(check_expensive_rate_limit)])
 async def plan_tool(request: ChatRequest):
     try:
         decision = await planner.plan(
@@ -354,7 +476,31 @@ async def plan_tool(request: ChatRequest):
 @app.post("/api/tools/{tool_name}")
 async def execute_tool(tool_name: str, arguments: dict | None = None):
     try:
-        result = await tools.execute(tool_name, **(arguments or {}))
+        tool = tools.get(tool_name)
+    except ValueError:
+        raise HTTPException(status_code=404, detail=f"Unknown tool '{tool_name}'.")
+
+    permission = DEFAULT_TOOL_PERMISSIONS.get(tool_name, tool.permission)
+    if permission == Permission.BLOCKED:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Tool '{tool_name}' is blocked by Orion's security policy.",
+        )
+    if permission == Permission.CONFIRMATION_REQUIRED:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Tool '{tool_name}' requires confirmation and cannot be executed directly.",
+        )
+
+    raw_args = dict(arguments or {})
+    if "arguments" in raw_args and isinstance(raw_args["arguments"], dict) and len(raw_args) == 1:
+        raw_args = dict(raw_args["arguments"])
+
+    # Disallow client from passing confirmed: true to bypass confirmation workflow
+    raw_args.pop("confirmed", None)
+
+    try:
+        result = await tools.execute(tool_name, confirmed=False, **raw_args)
         return {"tool": tool_name, "result": result}
 
     except PermissionError as exc:
@@ -367,7 +513,7 @@ async def execute_tool(tool_name: str, arguments: dict | None = None):
         raise HTTPException(status_code=400, detail=str(exc))
 
 
-@app.post("/api/agent/run")
+@app.post("/api/agent/run", dependencies=[Depends(check_expensive_rate_limit)])
 async def agent_run(request: ChatRequest):
     """
     Full agent loop:
@@ -435,6 +581,7 @@ async def agent_run(request: ChatRequest):
 class ConfirmRequest(BaseModel):
     confirmation_id: str = Field(min_length=1)
     approved: bool
+    session_id: str | None = None
 
 
 @app.post("/api/agent/confirm")
@@ -445,11 +592,24 @@ async def confirm_action(request: ConfirmRequest):
             status_code=404,
             detail=f"Unknown or expired confirmation ID '{request.confirmation_id}'.",
         )
+    if pending.is_expired() or pending.status == "expired":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Confirmation '{request.confirmation_id}' has expired.",
+        )
     if pending.status != "pending":
         raise HTTPException(
             status_code=400,
             detail=f"Confirmation '{request.confirmation_id}' cannot be reused (status: {pending.status}).",
         )
+
+    # Validate session context binding if bound
+    if pending.session_id is not None:
+        if request.session_id != pending.session_id:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Confirmation '{request.confirmation_id}' is bound to session '{pending.session_id}' and requires a matching session context.",
+            )
 
     if not request.approved:
         confirmation_store.mark_rejected(request.confirmation_id)
@@ -473,6 +633,24 @@ async def confirm_action(request: ConfirmRequest):
             "executed": False,
             "message": f"Action for tool '{pending.tool}' was rejected by user.",
         }
+
+    # Validate tool existence and permission on server before executing
+    try:
+        target_tool = tools.get(pending.tool)
+    except ValueError:
+        pending.status = "error"
+        raise HTTPException(
+            status_code=404,
+            detail=f"Unknown tool '{pending.tool}' in pending confirmation.",
+        )
+
+    perm = DEFAULT_TOOL_PERMISSIONS.get(pending.tool, target_tool.permission)
+    if perm == Permission.BLOCKED:
+        pending.status = "error"
+        raise HTTPException(
+            status_code=403,
+            detail=f"Tool '{pending.tool}' is blocked by Orion's security policy.",
+        )
 
     # Approved: execute the exact previously stored operation
     confirmation_store.mark_approved(request.confirmation_id)
@@ -509,4 +687,31 @@ async def confirm_action(request: ConfirmRequest):
         "provider": "nebius",
         "model": settings.nebius_model,
     }
+
+
+@app.post("/api/demo/reseed", dependencies=[Depends(check_expensive_rate_limit)])
+async def reseed_demo(auth: str | None = Depends(verify_demo_auth)):
+    counts = seed_demo_data(force=True)
+    _ensure_demo_workspace()
+    return {
+        "status": "reseeded",
+        "message": "Demo data and workspace reseeded successfully.",
+        "counts": counts,
+    }
+
+
+@app.get("/{full_path:path}", include_in_schema=False)
+async def spa_fallback(full_path: str):
+    if full_path.startswith("api/") or full_path in ("docs", "redoc", "openapi.json"):
+        raise HTTPException(status_code=404, detail="Endpoint not found")
+    index_file = FRONTEND_DIST / "index.html"
+    if index_file.exists():
+        return FileResponse(index_file)
+    raise HTTPException(status_code=404, detail="Not found")
+
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("backend.app.main:app", host="0.0.0.0", port=port)
 

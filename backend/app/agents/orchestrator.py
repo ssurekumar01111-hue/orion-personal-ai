@@ -29,6 +29,8 @@ def _scrub_secrets(text: str) -> str:
             text = text.replace(settings.nebius_api_key, "<REDACTED>")
         if settings.hermes_gateway_token and len(settings.hermes_gateway_token) > 3:
             text = text.replace(settings.hermes_gateway_token, "<REDACTED>")
+        if settings.orion_demo_key and len(settings.orion_demo_key) > 3:
+            text = text.replace(settings.orion_demo_key, "<REDACTED>")
     except Exception:
         pass
 

@@ -52,9 +52,8 @@ class ToolRegistry:
         confirmed: bool = False,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        # Allow confirmed to be passed explicitly or within kwargs
-        if "confirmed" in kwargs:
-            confirmed = bool(kwargs.pop("confirmed"))
+        # Disallow caller/kwargs from overriding server confirmation status
+        kwargs.pop("confirmed", None)
 
         tool = self.get(name)
 

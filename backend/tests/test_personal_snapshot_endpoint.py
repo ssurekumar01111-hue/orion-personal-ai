@@ -9,6 +9,7 @@ Requirements:
 5. Parameter validation and bounded limits.
 6. No secrets exposed.
 """
+import os
 import sys
 import unittest
 import warnings
@@ -24,7 +25,11 @@ from app.main import app, personal_store
 
 class TestPersonalSnapshotEndpoint(unittest.TestCase):
     def setUp(self):
-        self.client = TestClient(app, raise_server_exceptions=True)
+        self.client = TestClient(
+            app,
+            headers={"Authorization": f"Bearer {os.environ.get('ORION_DEMO_KEY', 'test-demo-secret-key-12345-very-long')}"},
+            raise_server_exceptions=True,
+        )
 
     def test_snapshot_endpoint_returns_200(self):
         """1. Endpoint returns 200."""
@@ -63,8 +68,9 @@ class TestPersonalSnapshotEndpoint(unittest.TestCase):
         self.assertIsInstance(data["skills"], list)
         self.assertIsInstance(data["decisions"], list)
 
+        active_statuses = {"todo", "pending", "in_progress", "blocked"}
         db_goals = personal_store.list_goals(status="active", limit=10)
-        db_tasks = personal_store.list_tasks(limit=10)
+        db_tasks = [t for t in personal_store.list_tasks(limit=40) if t.get("status") in active_statuses][:20]
         db_skills = personal_store.list_skills(limit=10)
 
         self.assertEqual(len(data["goals"]), len(db_goals))

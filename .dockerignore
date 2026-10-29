@@ -1,0 +1,39 @@
+# Git metadata
+.git
+.gitignore
+
+# Environment variables and secrets
+.env
+.env.*
+*.env
+
+# Local databases and runtime data
+data/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.venv/
+backend/.venv/
+.pytest_cache/
+backend/.pytest_cache/
+
+# Node / Frontend artifacts
+node_modules/
+frontend/node_modules/
+frontend/dist/
+.vite/
+frontend/.vite/
+
+# System / editor files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo

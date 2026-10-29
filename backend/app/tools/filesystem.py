@@ -2,7 +2,7 @@ from typing import Any
 
 from .base import Tool
 from .permissions import Permission
-from .workspace import WORKSPACE_ROOT, is_protected_file, safe_path
+from .workspace import _get_workspace_root, is_protected_file, is_source_path, safe_path
 
 
 class ListDirectoryTool(Tool):
@@ -51,17 +51,26 @@ class ReadFileTool(Tool):
         self,
         path: str,
     ) -> dict[str, Any]:
-        raw_path = WORKSPACE_ROOT / path
+        workspace = _get_workspace_root()
+        raw_path = workspace / path
+
+        # Pre-resolution protected file check (catches obvious names before symlink follow).
         if is_protected_file(raw_path):
             raise PermissionError(
                 "Access to secret or environment files is forbidden."
             )
 
+        # Resolve and enforce workspace containment + source tree protection.
         file_path = safe_path(path)
 
         if is_protected_file(file_path):
             raise PermissionError(
                 "Access to secret or environment files is forbidden."
+            )
+
+        if is_source_path(file_path):
+            raise PermissionError(
+                "Access to application source files is forbidden."
             )
 
         if not file_path.exists():
@@ -97,7 +106,9 @@ class WriteFileTool(Tool):
         path: str,
         content: str = "",
     ) -> dict[str, Any]:
-        raw_path = WORKSPACE_ROOT / path
+        workspace = _get_workspace_root()
+        raw_path = workspace / path
+
         if is_protected_file(raw_path):
             raise PermissionError(
                 "Writing to secret or environment files is forbidden."
@@ -108,6 +119,11 @@ class WriteFileTool(Tool):
         if is_protected_file(file_path):
             raise PermissionError(
                 "Writing to secret or environment files is forbidden."
+            )
+
+        if is_source_path(file_path):
+            raise PermissionError(
+                "Writing to application source files is forbidden."
             )
 
         if file_path.is_dir():
@@ -137,7 +153,9 @@ class DeleteFileTool(Tool):
         self,
         path: str,
     ) -> dict[str, Any]:
-        raw_path = WORKSPACE_ROOT / path
+        workspace = _get_workspace_root()
+        raw_path = workspace / path
+
         if is_protected_file(raw_path):
             raise PermissionError(
                 "Deleting secret or environment files is forbidden."
@@ -145,7 +163,7 @@ class DeleteFileTool(Tool):
 
         file_path = safe_path(path)
 
-        if file_path == WORKSPACE_ROOT:
+        if file_path == workspace:
             raise PermissionError(
                 "Cannot delete the Orion workspace root."
             )
@@ -153,6 +171,11 @@ class DeleteFileTool(Tool):
         if is_protected_file(file_path):
             raise PermissionError(
                 "Deleting secret or environment files is forbidden."
+            )
+
+        if is_source_path(file_path):
+            raise PermissionError(
+                "Deleting application source files is forbidden."
             )
 
         if not file_path.exists():

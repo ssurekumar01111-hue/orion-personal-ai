@@ -40,7 +40,11 @@ sys.path.insert(0, str(Path(__file__).parents[1]))
 from starlette.testclient import TestClient
 from app.main import app
 
-client = TestClient(app, raise_server_exceptions=True)
+client = TestClient(
+    app,
+    headers={"Authorization": f"Bearer {os.environ.get('ORION_DEMO_KEY', 'test-demo-secret-key-12345-very-long')}"},
+    raise_server_exceptions=True,
+)
 
 AUDIT_LOG = Path(__file__).parents[2] / "data" / "audit.log"
 

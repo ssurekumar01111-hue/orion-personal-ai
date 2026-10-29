@@ -33,8 +33,14 @@ import {
 } from './api/system';
 import { ProviderType, SessionItem } from './types/api';
 import { Project, Goal, Task, Skill, EpisodicMemory } from './types/personal';
+import { getDemoKey, setDemoKey, onUnauthorized } from './api/client';
+import { DemoSignInModal } from './components/auth/DemoSignInModal';
 
 export const App: React.FC = () => {
+  // Authentication state
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => Boolean(getDemoKey()));
+  const [authError, setAuthError] = useState<string | null>(null);
+
   // Navigation & View state
   const [activeView, setActiveView] = useState<ActiveView>('conversation');
   const [mode, setMode] = useState<'chat' | 'agent'>('chat');
@@ -109,8 +115,26 @@ export const App: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    loadInitialData();
-  }, [loadInitialData]);
+    const unsubscribe = onUnauthorized(() => {
+      setIsAuthenticated(false);
+      setAuthError('Authentication required or session expired. Please re-enter demo key.');
+    });
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => {
+    if (isAuthenticated) {
+      loadInitialData();
+    }
+  }, [isAuthenticated, loadInitialData]);
+
+  const handleSignOut = () => {
+    setDemoKey(null);
+    setIsAuthenticated(false);
+    setActiveSessionId(null);
+    setMessages([]);
+    setAuthError(null);
+  };
 
   // Handle session selection and load history
   const handleSelectSession = async (sessionId: string) => {
@@ -254,6 +278,7 @@ export const App: React.FC = () => {
       const res = await confirmAgentAction({
         confirmation_id: confirmationId,
         approved,
+        session_id: activeSessionId,
       });
 
       // Update the confirmation state in messages
@@ -350,6 +375,8 @@ export const App: React.FC = () => {
           activeSessionTitle={activeSessionTitle}
           onToggleLeftSidebar={() => setLeftSidebarOpen(!leftSidebarOpen)}
           onToggleRightSidebar={() => setRightSidebarOpen(!rightSidebarOpen)}
+          onSignOut={handleSignOut}
+          isAuthenticated={isAuthenticated}
         />
 
         {/* View Switcher: Conversation vs Panels */}
@@ -434,6 +461,16 @@ export const App: React.FC = () => {
           onClick={() => setRightSidebarOpen(false)}
         />
       )}
+
+      {/* Demo Sign In Modal */}
+      <DemoSignInModal
+        isOpen={!isAuthenticated}
+        onSuccess={() => {
+          setIsAuthenticated(true);
+          setAuthError(null);
+        }}
+        initialError={authError}
+      />
     </div>
   );
 };

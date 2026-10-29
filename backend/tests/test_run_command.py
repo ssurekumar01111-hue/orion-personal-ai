@@ -3,12 +3,14 @@ Focused security and functional tests for RunCommandTool:
 - Registration and confirmation policy
 - Command allowlist and argument policy validation
 - Shell wrapper and metacharacter rejection
-- Workspace boundary and cwd pinning
+- Workspace boundary and cwd pinning (now points to dedicated workspace)
 - Timeout enforcement and output bounds
 - Secret redaction in output and audit log
+- Secret exclusion from subprocess environment
 - Agent loop integration (confirmation required without execution)
 """
 import json
+import os
 import sys
 import unittest
 import warnings
@@ -25,13 +27,20 @@ sys.path.insert(0, str(Path(__file__).parents[1]))
 from starlette.testclient import TestClient
 from app.config import get_settings
 from app.main import app
-from app.tools.command import RunCommandTool
+from app.tools.command import RunCommandTool, _get_safe_env
 from app.tools.registry import create_default_registry
-from app.tools.workspace import WORKSPACE_ROOT
+from app.tools.workspace import _get_workspace_root, PROJECT_ROOT
 
 client = TestClient(app, raise_server_exceptions=True)
 settings = get_settings()
-AUDIT_LOG = WORKSPACE_ROOT / "data" / "audit.log"
+
+
+AUDIT_LOG = PROJECT_ROOT / "data" / "audit.log"
+
+
+def _audit_log() -> Path:
+    """Return the audit log path in Orion's writable data area."""
+    return AUDIT_LOG
 
 
 class TestRunCommandTool(unittest.IsolatedAsyncioTestCase):
@@ -69,28 +78,51 @@ class TestRunCommandTool(unittest.IsolatedAsyncioTestCase):
                 pass
             mock_run.assert_not_called()
 
-    # 5. git status executes successfully when confirmed
-    async def test_5_git_status_executes_successfully_when_confirmed(self):
+    # 5. git status runs without policy rejection when confirmed
+    async def test_5_git_status_executes_when_confirmed(self):
         result = await self.registry.execute(
             "run_command",
             confirmed=True,
             command="git",
-            arguments=["status", "--short"],
+            arguments=["status"],
+        )
+        # The workspace may not be a git repo; non-zero exit is acceptable.
+        # We verify the tool ran without policy rejection (no ValueError raised).
+        self.assertIn(result["status"], ("completed", "timeout"))
+        self.assertEqual(result["command"], "git")
+
+    # 5b. python --version executes successfully when confirmed
+    async def test_5b_python_version_executes_successfully_when_confirmed(self):
+        result = await self.registry.execute(
+            "run_command",
+            confirmed=True,
+            command="python3",
+            arguments=["--version"],
         )
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["return_code"], 0)
-        self.assertIsInstance(result["stdout"], str)
-        self.assertEqual(result["command"], "git")
-        self.assertEqual(result["arguments"], ["status", "--short"])
 
-    # 6. cwd is exactly /home/gfood/orion
-    async def test_6_cwd_is_exactly_orion_workspace(self):
+    # 6. cwd is exactly the dedicated workspace root (NOT the source tree)
+    async def test_6_cwd_is_dedicated_workspace_not_source_tree(self):
+        workspace = _get_workspace_root()
+        source_root = PROJECT_ROOT
+
+        # Workspace must not be the source tree
+        self.assertNotEqual(str(workspace), str(source_root))
+        # Workspace must not be inside application source code
+        for src_dir in (source_root / "backend", source_root / "frontend", source_root / ".git"):
+            with self.subTest(src_dir=src_dir):
+                self.assertFalse(str(workspace).startswith(str(src_dir)))
+
         mock_proc = MagicMock(returncode=0, stdout="clean", stderr="")
         with patch("subprocess.run", return_value=mock_proc) as mock_run:
             await self.tool.execute("git", ["status"])
             mock_run.assert_called_once()
             _, kwargs = mock_run.call_args
-            self.assertEqual(kwargs.get("cwd"), str(WORKSPACE_ROOT))
+            actual_cwd = kwargs.get("cwd")
+            self.assertEqual(actual_cwd, str(workspace))
+            # Double-check: cwd must NOT be the source repo
+            self.assertNotEqual(actual_cwd, str(source_root))
 
     # 7. shell=True is never used
     async def test_7_shell_false_is_always_used(self):
@@ -224,7 +256,7 @@ class TestRunCommandTool(unittest.IsolatedAsyncioTestCase):
         mock_proc = MagicMock(returncode=0, stdout=leaky_text, stderr="")
         with patch("subprocess.run", return_value=mock_proc):
             await self.registry.execute("run_command", confirmed=True, command="git", arguments=["status"])
-        audit_text = AUDIT_LOG.read_text(encoding="utf-8")
+        audit_text = _audit_log().read_text(encoding="utf-8")
         self.assertNotIn(settings.nebius_api_key, audit_text)
 
     # 24. Hermes token does not appear in output
@@ -246,8 +278,132 @@ class TestRunCommandTool(unittest.IsolatedAsyncioTestCase):
         mock_proc = MagicMock(returncode=0, stdout=leaky_text, stderr="")
         with patch("subprocess.run", return_value=mock_proc):
             await self.registry.execute("run_command", confirmed=True, command="git", arguments=["status"])
-        audit_text = AUDIT_LOG.read_text(encoding="utf-8")
+        audit_text = _audit_log().read_text(encoding="utf-8")
         self.assertNotIn(settings.hermes_gateway_token, audit_text)
+
+    # 26. Command execution fails closed in production / public-demo mode
+    async def test_26_command_execution_fails_closed_in_production_mode(self):
+        mock_settings = MagicMock(environment="production")
+        with patch("app.config.get_settings", return_value=mock_settings):
+            with self.assertRaises(PermissionError) as ctx:
+                await self.tool.execute("git", ["status"])
+            self.assertIn("disabled in public-demo / production mode", str(ctx.exception))
+
+
+class TestSafeEnvSecretExclusion(unittest.TestCase):
+    """
+    Verify that _get_safe_env() excludes deployment secrets from the
+    child process environment.
+    """
+
+    def test_nebius_api_key_excluded_from_env(self):
+        """NEBIUS_API_KEY must not appear in the sanitised environment."""
+        original = os.environ.get("NEBIUS_API_KEY")
+        try:
+            os.environ["NEBIUS_API_KEY"] = "super-secret-nebius-key-12345"
+            safe = _get_safe_env()
+            self.assertNotIn("NEBIUS_API_KEY", safe)
+        finally:
+            if original is not None:
+                os.environ["NEBIUS_API_KEY"] = original
+            else:
+                os.environ.pop("NEBIUS_API_KEY", None)
+
+    def test_orion_demo_key_excluded_from_env(self):
+        """ORION_DEMO_KEY must not appear in the sanitised environment."""
+        original = os.environ.get("ORION_DEMO_KEY")
+        try:
+            os.environ["ORION_DEMO_KEY"] = "demo-secret-key-abcdef123456789"
+            safe = _get_safe_env()
+            self.assertNotIn("ORION_DEMO_KEY", safe)
+        finally:
+            if original is not None:
+                os.environ["ORION_DEMO_KEY"] = original
+            else:
+                os.environ.pop("ORION_DEMO_KEY", None)
+
+    def test_hermes_gateway_token_excluded_from_env(self):
+        """HERMES_GATEWAY_TOKEN must not appear in the sanitised environment."""
+        original = os.environ.get("HERMES_GATEWAY_TOKEN")
+        try:
+            os.environ["HERMES_GATEWAY_TOKEN"] = "hermes-token-xyz-987654"
+            safe = _get_safe_env()
+            self.assertNotIn("HERMES_GATEWAY_TOKEN", safe)
+        finally:
+            if original is not None:
+                os.environ["HERMES_GATEWAY_TOKEN"] = original
+            else:
+                os.environ.pop("HERMES_GATEWAY_TOKEN", None)
+
+    def test_path_is_preserved_in_safe_env(self):
+        """PATH must be preserved in the sanitised environment."""
+        safe = _get_safe_env()
+        self.assertIn("PATH", safe)
+
+    def test_generic_token_variable_excluded(self):
+        """Any variable with TOKEN in the name must be excluded."""
+        original = os.environ.get("MY_CUSTOM_TOKEN")
+        try:
+            os.environ["MY_CUSTOM_TOKEN"] = "custom-token-value-abc"
+            safe = _get_safe_env()
+            self.assertNotIn("MY_CUSTOM_TOKEN", safe)
+        finally:
+            if original is not None:
+                os.environ["MY_CUSTOM_TOKEN"] = original
+            else:
+                os.environ.pop("MY_CUSTOM_TOKEN", None)
+
+    def test_child_process_cannot_read_nebius_key(self):
+        """
+        Run a real subprocess via python3 and verify that NEBIUS_API_KEY
+        does not appear in the child's environment.
+        """
+        sentinel = "SENTINEL_NEBIUS_KEY_VALUE_UNIQUE_99887766"
+        original = os.environ.get("NEBIUS_API_KEY")
+        try:
+            os.environ["NEBIUS_API_KEY"] = sentinel
+            safe = _get_safe_env()
+            proc = subprocess.run(
+                ["python3", "-c", "import os, json; print(json.dumps(dict(os.environ)))"],
+                capture_output=True,
+                text=True,
+                env=safe,
+                shell=False,
+                timeout=10,
+            )
+            child_env_text = proc.stdout
+            self.assertNotIn(sentinel, child_env_text,
+                             "NEBIUS_API_KEY value must not appear in child process environment")
+        finally:
+            if original is not None:
+                os.environ["NEBIUS_API_KEY"] = original
+            else:
+                os.environ.pop("NEBIUS_API_KEY", None)
+
+    def test_child_process_cannot_read_orion_demo_key(self):
+        """
+        Run a real subprocess and verify ORION_DEMO_KEY is absent in child env.
+        """
+        sentinel = "SENTINEL_DEMO_KEY_UNIQUE_55443322"
+        original = os.environ.get("ORION_DEMO_KEY")
+        try:
+            os.environ["ORION_DEMO_KEY"] = sentinel
+            safe = _get_safe_env()
+            proc = subprocess.run(
+                ["python3", "-c", "import os, json; print(json.dumps(dict(os.environ)))"],
+                capture_output=True,
+                text=True,
+                env=safe,
+                shell=False,
+                timeout=10,
+            )
+            self.assertNotIn(sentinel, proc.stdout,
+                             "ORION_DEMO_KEY value must not appear in child process environment")
+        finally:
+            if original is not None:
+                os.environ["ORION_DEMO_KEY"] = original
+            else:
+                os.environ.pop("ORION_DEMO_KEY", None)
 
 
 class TestAgentRunCommandIntegration(unittest.TestCase):

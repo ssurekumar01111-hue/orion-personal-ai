@@ -3,7 +3,7 @@ from typing import Any
 
 from .base import Tool
 from .permissions import Permission
-from .workspace import WORKSPACE_ROOT
+from .workspace import _get_workspace_root
 
 
 class GitStatusTool(Tool):
@@ -21,7 +21,7 @@ class GitStatusTool(Tool):
         try:
             proc = subprocess.run(
                 ["git", "status", "--porcelain=v1", "-b"],
-                cwd=str(WORKSPACE_ROOT),
+                cwd=str(_get_workspace_root()),
                 capture_output=True,
                 text=True,
                 check=False,

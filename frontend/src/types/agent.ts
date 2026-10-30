@@ -1,5 +1,5 @@
-export type StepActionType = 'understand' | 'plan' | 'tool' | 'observe' | 'respond';
-export type StepStatusType = 'executed' | 'confirmation_required' | 'blocked' | 'error' | 'completed' | 'repeated_call' | 'pending';
+export type StepActionType = 'understand' | 'remember' | 'plan' | 'tool' | 'observe' | 'learn' | 'respond';
+export type StepStatusType = 'executed' | 'confirmation_required' | 'blocked' | 'error' | 'completed' | 'repeated_call' | 'pending' | 'learned';
 
 export interface AgentStep {
   step: number;
@@ -11,6 +11,16 @@ export interface AgentStep {
   error?: string;
   confirmation_id?: string;
   result?: unknown;
+}
+
+export interface LearningResult {
+  status: string;
+  task_key: string;
+  completion_status: string;
+  learned_memories: Array<{ id: number; content: string; category: string; importance: number }>;
+  learned_decisions: Array<{ id: number; decision: string }>;
+  task_updates: Array<{ task_id: number; title: string; new_status: string; verified_by?: string }>;
+  summary: string;
 }
 
 export interface ActivityTimelineItem {

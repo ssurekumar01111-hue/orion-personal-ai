@@ -69,7 +69,11 @@ def set_database_path(path: Path | str | None) -> None:
         DATABASE_PATH = resolved
 
 
+_is_initializing = False
+
+
 def get_connection() -> sqlite3.Connection:
+    global _is_initializing
     db_path = get_database_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -77,6 +81,20 @@ def get_connection() -> sqlite3.Connection:
     connection.row_factory = sqlite3.Row
 
     connection.execute("PRAGMA foreign_keys = ON")
+
+    if not _is_initializing:
+        try:
+            has_table = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memories'"
+            ).fetchone()
+            if not has_table:
+                _is_initializing = True
+                try:
+                    initialize_database()
+                finally:
+                    _is_initializing = False
+        except Exception:
+            pass
 
     return connection
 
@@ -90,9 +108,45 @@ def initialize_database() -> None:
                 content TEXT NOT NULL,
                 category TEXT NOT NULL DEFAULT 'general',
                 importance INTEGER NOT NULL DEFAULT 3,
+                source_session TEXT,
+                project_id INTEGER,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (project_id)
+                    REFERENCES projects(id)
+                    ON DELETE SET NULL
             )
+            """
+        )
+
+        # Safe additive migrations for existing memories table
+        existing_mem_cols = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(memories)").fetchall()
+        }
+        if "source_session" not in existing_mem_cols:
+            connection.execute("ALTER TABLE memories ADD COLUMN source_session TEXT")
+        if "project_id" not in existing_mem_cols:
+            connection.execute(
+                "ALTER TABLE memories ADD COLUMN project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL"
+            )
+
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_memories_category_importance
+            ON memories(category, importance)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_memories_project
+            ON memories(project_id)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_memories_session
+            ON memories(source_session)
             """
         )
 
@@ -235,6 +289,133 @@ def initialize_database() -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_decisions_project
             ON decisions(project_id)
+            """
+        )
+
+        # ── Skill Learning & Versioning Tables (LEARN Stage) ────────────────
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS skill_executions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                skill_id INTEGER NOT NULL,
+                session_id TEXT,
+                status TEXT NOT NULL,
+                step_results TEXT NOT NULL DEFAULT '[]',
+                failure_reason TEXT,
+                duration_ms REAL DEFAULT 0.0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (skill_id)
+                    REFERENCES skills(id)
+                    ON DELETE CASCADE
+            )
+            """
+        )
+
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_skill_executions_skill
+            ON skill_executions(skill_id, created_at)
+            """
+        )
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS skill_proposals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                skill_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                proposed_workflow TEXT NOT NULL,
+                rationale TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                applied_at TEXT,
+                FOREIGN KEY (skill_id)
+                    REFERENCES skills(id)
+                    ON DELETE CASCADE
+            )
+            """
+        )
+
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_skill_proposals_skill
+            ON skill_proposals(skill_id, status)
+            """
+        )
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS skill_versions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                skill_id INTEGER NOT NULL,
+                version_number INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                workflow TEXT NOT NULL,
+                change_summary TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (skill_id)
+                    REFERENCES skills(id)
+                    ON DELETE CASCADE,
+                UNIQUE (skill_id, version_number)
+            )
+            """
+        )
+
+        # Safe migration: if existing records contain duplicate versions, renumber sequentially
+        # to ensure no data is lost before enforcing unique index
+        dup_rows = connection.execute(
+            """
+            SELECT skill_id, version_number, COUNT(*) as cnt
+            FROM skill_versions
+            GROUP BY skill_id, version_number
+            HAVING cnt > 1
+            """
+        ).fetchall()
+        if dup_rows:
+            for dup in dup_rows:
+                s_id = dup["skill_id"]
+                all_v = connection.execute(
+                    "SELECT id FROM skill_versions WHERE skill_id = ? ORDER BY id ASC",
+                    (s_id,),
+                ).fetchall()
+                for idx, v_row in enumerate(all_v, start=1):
+                    connection.execute(
+                        "UPDATE skill_versions SET version_number = ? WHERE id = ?",
+                        (idx, v_row["id"]),
+                    )
+
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_versions_skill_version
+            ON skill_versions(skill_id, version_number)
+            """
+        )
+
+        # ── Automated Post-Task Learning Events Table ───────────────────────
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS learning_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_key TEXT NOT NULL UNIQUE,
+                session_id TEXT,
+                user_objective TEXT NOT NULL,
+                completion_status TEXT NOT NULL,
+                learned_memories_count INTEGER DEFAULT 0,
+                learned_decisions_count INTEGER DEFAULT 0,
+                task_updates_count INTEGER DEFAULT 0,
+                summary TEXT NOT NULL DEFAULT '',
+                details TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_learning_events_session
+            ON learning_events(session_id)
             """
         )
 

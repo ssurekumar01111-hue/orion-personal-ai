@@ -173,6 +173,18 @@ class ContextEngine:
         user_message: str,
         limit: int = 5,
     ) -> list[dict[str, Any]]:
+        if not user_message:
+            return []
+
+        # 1. First attempt full query recall with enhanced relevance scoring
+        direct_matches = self.memory_store.recall(
+            query=user_message,
+            limit=limit,
+        )
+        if direct_matches:
+            return direct_matches[:limit]
+
+        # 2. Token-by-token fallback
         words = [
             word.strip(".,!?;:\"'()[]{}").lower()
             for word in user_message.split()

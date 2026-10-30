@@ -9,12 +9,14 @@ Provides Orion tools for skill creation, updating, and execution:
 """
 import copy
 import json
+import time
 from typing import Any
 
 from ...memory.personal import PersonalModelStore
 from ..audit import log_event
 from ..base import Tool
 from ..permissions import DEFAULT_TOOL_PERMISSIONS, Permission
+from .learning import SkillLearningService
 from .validator import SkillValidator
 
 
@@ -32,9 +34,13 @@ class CreateSkillTool(Tool):
         self,
         store: PersonalModelStore | None = None,
         registry: Any | None = None,
+        learning_service: SkillLearningService | None = None,
     ) -> None:
         self.store = store or PersonalModelStore()
         self.registry = registry
+        self.learning_service = learning_service or SkillLearningService(
+            personal_store=self.store, registry=self.registry
+        )
 
     async def execute(self, **kwargs: Any) -> dict[str, Any]:
         allowed_keys = {"name", "description", "workflow"}
@@ -66,6 +72,15 @@ class CreateSkillTool(Tool):
             workflow=workflow_json,
         )
 
+        # Snapshot initial version
+        try:
+            self.learning_service.save_version_snapshot(
+                skill_id=skill["id"],
+                change_summary="Initial creation of skill",
+            )
+        except Exception:
+            pass
+
         return {
             "status": "created",
             "source": "user_confirmed_agent_action",
@@ -85,9 +100,13 @@ class UpdateSkillTool(Tool):
         self,
         store: PersonalModelStore | None = None,
         registry: Any | None = None,
+        learning_service: SkillLearningService | None = None,
     ) -> None:
         self.store = store or PersonalModelStore()
         self.registry = registry
+        self.learning_service = learning_service or SkillLearningService(
+            personal_store=self.store, registry=self.registry
+        )
 
     async def execute(self, **kwargs: Any) -> dict[str, Any]:
         allowed_keys = {"skill_id", "name", "description", "workflow"}
@@ -136,9 +155,27 @@ class UpdateSkillTool(Tool):
                 "skill": skill,
             }
 
+        # Snapshot before update for rollback
+        try:
+            self.learning_service.save_version_snapshot(
+                skill_id=skill_id,
+                change_summary="Pre-update snapshot",
+            )
+        except Exception:
+            pass
+
         skill = self.store.update_skill(skill_id, **update_fields)
         if skill is None:
             raise ValueError(f"Skill with ID {skill_id} not found.")
+
+        # Snapshot post-update version
+        try:
+            self.learning_service.save_version_snapshot(
+                skill_id=skill_id,
+                change_summary="User confirmed skill update",
+            )
+        except Exception:
+            pass
 
         return {
             "status": "updated",
@@ -159,11 +196,17 @@ class UseSkillTool(Tool):
         self,
         registry: Any,
         store: PersonalModelStore | None = None,
+        learning_service: SkillLearningService | None = None,
     ) -> None:
         self.registry = registry
         self.store = store or PersonalModelStore()
+        self.learning_service = learning_service or SkillLearningService(
+            personal_store=self.store, registry=self.registry
+        )
 
     async def execute(self, **kwargs: Any) -> dict[str, Any]:
+        start_time = time.perf_counter()
+        session_id = kwargs.get("session_id")
         skill_id = kwargs.get("skill_id")
         skill_name = kwargs.get("skill_name")
 
@@ -211,6 +254,19 @@ class UseSkillTool(Tool):
 
             # 1. BLOCKED
             if perm == Permission.BLOCKED:
+                duration_ms = (time.perf_counter() - start_time) * 1000.0
+                try:
+                    self.learning_service.record_execution(
+                        skill_id=skill["id"],
+                        status="blocked",
+                        step_results=executed_steps,
+                        failure_reason=f"Blocked tool '{tool_name}' at step {idx}",
+                        duration_ms=duration_ms,
+                        session_id=session_id,
+                    )
+                except Exception:
+                    pass
+
                 log_event(
                     event="skill_execution_stopped",
                     tool=self.name,
@@ -229,6 +285,19 @@ class UseSkillTool(Tool):
 
             # 2. CONFIRMATION_REQUIRED
             if perm == Permission.CONFIRMATION_REQUIRED:
+                duration_ms = (time.perf_counter() - start_time) * 1000.0
+                try:
+                    self.learning_service.record_execution(
+                        skill_id=skill["id"],
+                        status="confirmation_required",
+                        step_results=executed_steps,
+                        failure_reason=f"Confirmation required for '{tool_name}' at step {idx}",
+                        duration_ms=duration_ms,
+                        session_id=session_id,
+                    )
+                except Exception:
+                    pass
+
                 log_event(
                     event="skill_execution_stopped",
                     tool=self.name,
@@ -259,6 +328,19 @@ class UseSkillTool(Tool):
                     "result": step_result,
                 })
             except Exception as exc:
+                duration_ms = (time.perf_counter() - start_time) * 1000.0
+                try:
+                    self.learning_service.record_execution(
+                        skill_id=skill["id"],
+                        status="error",
+                        step_results=executed_steps,
+                        failure_reason=str(exc),
+                        duration_ms=duration_ms,
+                        session_id=session_id,
+                    )
+                except Exception:
+                    pass
+
                 log_event(
                     event="skill_execution_error",
                     tool=self.name,
@@ -277,12 +359,25 @@ class UseSkillTool(Tool):
                     "message": f"Skill execution failed at step {idx} ({tool_name}): {exc}",
                 }
 
+        duration_ms = (time.perf_counter() - start_time) * 1000.0
+        try:
+            self.learning_service.record_execution(
+                skill_id=skill["id"],
+                status="completed",
+                step_results=executed_steps,
+                failure_reason=None,
+                duration_ms=duration_ms,
+                session_id=session_id,
+            )
+        except Exception:
+            pass
+
         log_event(
             event="skill_execution_completed",
             tool=self.name,
             arguments={"skill_id": skill["id"], "skill_name": skill["name"]},
             status="success",
-            result={"steps_executed": len(executed_steps)},
+            result={"steps_executed": len(executed_steps), "duration_ms": duration_ms},
         )
 
         return {
@@ -290,4 +385,5 @@ class UseSkillTool(Tool):
             "skill_id": skill["id"],
             "skill_name": skill["name"],
             "executed_steps": executed_steps,
+            "duration_ms": duration_ms,
         }

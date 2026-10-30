@@ -25,6 +25,7 @@ import {
   getPersonalSnapshot,
   getSkills,
   getRecentMemories,
+  deleteMemory,
 } from './api/personal';
 import {
   getHealth,
@@ -253,10 +254,22 @@ export const App: React.FC = () => {
           model: res.model,
           agentSteps: res.steps,
           confirmation: confirmationData,
+          learning: (res as any).learning,
           timestamp: new Date().toISOString(),
         };
 
         setMessages((prev) => [...prev, assistantMsg]);
+
+        // Refresh memories and personal snapshot if learning occurred
+        if ((res as any).learning) {
+          getRecentMemories(20).then(setMemories).catch(() => {});
+          getPersonalSnapshot().then((snap) => {
+            setProjects(snap.projects);
+            setGoals(snap.goals);
+            setTasks(snap.tasks);
+            setSkills(snap.skills);
+          }).catch(() => {});
+        }
       }
     } catch (err: unknown) {
       const errorText = err instanceof Error ? err.message : 'Unknown execution error occurred.';
@@ -420,13 +433,27 @@ export const App: React.FC = () => {
 
           {activeView === 'skills' && (
             <div className="flex-1 overflow-y-auto">
-              <SkillsPanel skills={skills} />
+              <SkillsPanel
+                skills={skills}
+                onSkillUpdated={async () => {
+                  const updatedSkills = await getSkills();
+                  setSkills(updatedSkills);
+                }}
+              />
             </div>
           )}
 
           {activeView === 'memory' && (
             <div className="flex-1 overflow-y-auto">
-              <MemoryPanel memories={memories} />
+              <MemoryPanel
+                memories={memories}
+                onDeleteMemory={async (memId) => {
+                  const ok = await deleteMemory(memId);
+                  if (ok) {
+                    setMemories((prev) => prev.filter((m) => m.id !== memId));
+                  }
+                }}
+              />
             </div>
           )}
 

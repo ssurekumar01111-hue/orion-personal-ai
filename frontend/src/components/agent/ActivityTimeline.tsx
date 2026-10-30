@@ -44,6 +44,7 @@ export const ActivityTimeline: React.FC<ActivityTimelineProps> = ({
     if (status === 'error') return <XCircle className="w-4 h-4 text-rose-400" />;
     if (status === 'blocked') return <ShieldAlert className="w-4 h-4 text-amber-400" />;
     if (status === 'confirmation_required') return <ShieldAlert className="w-4 h-4 text-amber-400" />;
+    if (action === 'learn' || status === 'learned') return <Sparkles className="w-4 h-4 text-amber-400" />;
     if (action === 'respond' || status === 'completed') return <CheckCircle2 className="w-4 h-4 text-emerald-400" />;
     if (action === 'tool' || status === 'executed') return <Terminal className="w-4 h-4 text-cyan-400" />;
     if (action === 'plan') return <Brain className="w-4 h-4 text-purple-400" />;
@@ -63,6 +64,8 @@ export const ActivityTimeline: React.FC<ActivityTimelineProps> = ({
         return <Badge variant="rose">error</Badge>;
       case 'completed':
         return <Badge variant="emerald">completed</Badge>;
+      case 'learned':
+        return <Badge variant="amber">learned</Badge>;
       case 'repeated_call':
         return <Badge variant="amber">repeated call stopped</Badge>;
       default:

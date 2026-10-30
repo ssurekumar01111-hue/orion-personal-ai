@@ -15,6 +15,7 @@ from fastapi.openapi.utils import get_openapi
 from .config import get_settings
 from .memory import (
     ContextEngine,
+    MemoryExtractionService,
     MemoryStore,
     PersonalModelService,
     PersonalModelStore,
@@ -30,7 +31,9 @@ from .rate_limiter import (
     record_auth_failure,
 )
 from .agents import AgentOrchestrator
+from .agents.learning import PostTaskLearningService
 from .tools import ConfirmationStore, create_default_registry
+from .tools.skills.learning import SkillLearningService
 from .tools.audit import log_event
 from .tools.permissions import DEFAULT_TOOL_PERMISSIONS, Permission
 from .tools.planner import ToolPlanner
@@ -64,12 +67,22 @@ planner = ToolPlanner(router)
 tools = create_default_registry(personal_store=personal_store)
 confirmation_store = ConfirmationStore()
 
+extraction_service = MemoryExtractionService(memory_store=memory)
+skill_learning_service = SkillLearningService(personal_store=personal_store, registry=tools)
+
+learning_service = PostTaskLearningService(
+    memory_store=memory,
+    personal_store=personal_store,
+    extraction_service=extraction_service,
+)
+
 orchestrator = AgentOrchestrator(
     router=router,
     registry=tools,
     context_engine=context_engine,
     planner=planner,
     confirmation_store=confirmation_store,
+    learning_service=learning_service,
 )
 
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -334,11 +347,18 @@ async def chat(request: ChatRequest):
             content=response_text,
         )
 
+        # Conversational memory extraction (Feature 1)
+        extracted = extraction_service.extract_from_conversation(
+            user_message=request.message,
+            session_id=session_id,
+        )
+
         return {
             "session_id": session_id,
             "provider": request.provider,
             "model": result.get("model", settings.nebius_model),
             "response": response_text,
+            "extracted_memories": extracted,
             "context": {
                 "memories_used": len(context["memories"]),
                 "memory_ids": [
@@ -448,6 +468,77 @@ async def get_skills(limit: int = 50):
     if limit < 1 or limit > 100:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 100")
     return {"skills": personal_store.list_skills(limit=limit)}
+
+
+@app.get("/api/skills/{skill_id}/executions")
+async def get_skill_executions(skill_id: int, limit: int = 20):
+    if limit < 1 or limit > 100:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 100")
+    return {"executions": skill_learning_service.get_execution_history(skill_id=skill_id, limit=limit)}
+
+
+@app.get("/api/skills/{skill_id}/proposals")
+async def get_skill_proposals(skill_id: int, status: str | None = None):
+    return {"proposals": skill_learning_service.list_proposals(skill_id=skill_id, status=status)}
+
+
+@app.post("/api/skills/{skill_id}/proposals/{proposal_id}/approve", dependencies=[Depends(check_expensive_rate_limit)])
+async def approve_skill_proposal(skill_id: int, proposal_id: int):
+    try:
+        res = skill_learning_service.approve_proposal(skill_id=skill_id, proposal_id=proposal_id)
+        return res
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
+
+@app.post("/api/skills/{skill_id}/proposals/{proposal_id}/reject", dependencies=[Depends(check_expensive_rate_limit)])
+async def reject_skill_proposal(skill_id: int, proposal_id: int):
+    try:
+        return skill_learning_service.reject_proposal(skill_id=skill_id, proposal_id=proposal_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/skills/{skill_id}/versions")
+async def get_skill_versions(skill_id: int):
+    return {"versions": skill_learning_service.list_versions(skill_id=skill_id)}
+
+
+@app.post("/api/skills/{skill_id}/rollback/{version_number}", dependencies=[Depends(check_expensive_rate_limit)])
+async def rollback_skill(skill_id: int, version_number: int):
+    try:
+        return skill_learning_service.rollback_to_version(skill_id=skill_id, version_number=version_number)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/learning/events")
+async def list_learning_events(session_id: str | None = None, limit: int = 20):
+    limit = max(1, min(100, limit))
+    query = "SELECT * FROM learning_events"
+    params = []
+    if session_id:
+        query += " WHERE session_id = ?"
+        params.append(session_id)
+    query += " ORDER BY created_at DESC, id DESC LIMIT ?"
+    params.append(limit)
+
+    from .memory.database import get_connection
+    with get_connection() as connection:
+        rows = connection.execute(query, tuple(params)).fetchall()
+
+    events = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["details"] = json.loads(d["details"])
+        except Exception:
+            pass
+        events.append(d)
+
+    return {"events": events}
 
 
 @app.get("/api/tools")
@@ -678,7 +769,22 @@ async def confirm_action(request: ConfirmRequest):
             content=f"Executed confirmed tool '{pending.tool}': {json.dumps(result, ensure_ascii=False)}",
         )
 
-    return {
+    # Post-task learning for confirmed action (Feature 3)
+    learning_outcome = None
+    try:
+        learning_outcome = learning_service.learn_from_turn(
+            user_objective=f"Execute confirmed action: {pending.tool}",
+            steps=[{"step": 1, "action": "tool", "tool": pending.tool, "status": "executed"}],
+            observations=[{"step": 1, "tool": pending.tool, "result": result}],
+            final_answer=f"Confirmed tool '{pending.tool}' executed successfully.",
+            session_id=pending.session_id,
+            confirmation_required=False,
+            confirmed_result={"tool": pending.tool, "result": result},
+        )
+    except Exception:
+        pass
+
+    resp_payload = {
         "status": "executed",
         "confirmation_id": request.confirmation_id,
         "tool": pending.tool,
@@ -687,6 +793,10 @@ async def confirm_action(request: ConfirmRequest):
         "provider": "nebius",
         "model": settings.nebius_model,
     }
+    if learning_outcome:
+        resp_payload["learning"] = learning_outcome
+
+    return resp_payload
 
 
 @app.post("/api/demo/reseed", dependencies=[Depends(check_expensive_rate_limit)])

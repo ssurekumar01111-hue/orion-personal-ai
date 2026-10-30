@@ -7,6 +7,7 @@ import {
   Bot,
   User,
   Database,
+  Sparkles,
 } from 'lucide-react';
 
 export interface ExtendedMessage {
@@ -22,6 +23,12 @@ export interface ExtendedMessage {
     messages_used?: number;
   };
   agentSteps?: AgentStep[];
+  learning?: {
+    status?: string;
+    summary?: string;
+    learned_memories?: Array<{ id: number; content: string; category: string }>;
+    task_updates?: Array<{ task_id: number; title: string; new_status: string }>;
+  };
   confirmation?: {
     confirmationId: string;
     tool: string;
@@ -150,6 +157,17 @@ export const MessageList: React.FC<MessageListProps> = ({
                   }`}
                 >
                   <p className="whitespace-pre-wrap font-sans">{msg.content}</p>
+                </div>
+              )}
+
+              {/* LEARN stage indicator */}
+              {!isUser && msg.learning && msg.learning.status === 'learned' && (
+                <div className="w-full rounded-xl bg-amber-950/30 border border-amber-500/20 px-3 py-2 text-xs flex items-center justify-between text-amber-200 font-mono">
+                  <div className="flex items-center gap-2">
+                    <Sparkles className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                    <span>{msg.learning.summary || 'Learned from turn and updated knowledge.'}</span>
+                  </div>
+                  <Badge variant="amber" size="sm">LEARN</Badge>
                 </div>
               )}
 

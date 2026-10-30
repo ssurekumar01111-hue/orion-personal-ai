@@ -261,6 +261,30 @@ class TestDemoAuthSecurity(unittest.TestCase):
             self.assertIn("Retry-After", res_blocked.headers)
             self.assertIn("Rate limit exceeded", res_blocked.json().get("detail", ""))
 
+    def test_skill_mutation_endpoints_require_auth_and_rate_limiting(self):
+        """Skill proposal approve, reject, and rollback endpoints enforce Bearer auth and expensive rate limit."""
+        # 1. Reject unauthenticated requests
+        self.assertEqual(self.unauthed_client.post("/api/skills/1/proposals/1/approve").status_code, 401)
+        self.assertEqual(self.unauthed_client.post("/api/skills/1/proposals/1/reject").status_code, 401)
+        self.assertEqual(self.unauthed_client.post("/api/skills/1/rollback/1").status_code, 401)
+
+        # 2. Rate limiting (20 requests per minute)
+        limiter.clear()
+        auth_client = TestClient(
+            app,
+            headers={"Authorization": f"Bearer {TEST_KEY}", "X-Forwarded-For": "198.51.100.99"},
+        )
+
+        with patch("app.main.skill_learning_service.approve_proposal", return_value={"status": "approved"}):
+            for _ in range(20):
+                res = auth_client.post("/api/skills/1/proposals/1/approve")
+                self.assertEqual(res.status_code, 200)
+
+            # 21st request is rate limited
+            res_blocked = auth_client.post("/api/skills/1/proposals/1/approve")
+            self.assertEqual(res_blocked.status_code, 429)
+            self.assertIn("Rate limit exceeded", res_blocked.json().get("detail", ""))
+
 
 class TestConfirmationSecurity(unittest.TestCase):
     """Phase 4 & Phase 5: Confirmation Security and Bypass Elimination Tests."""

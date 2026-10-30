@@ -88,12 +88,21 @@ class AgentOrchestrator:
         context_engine: ContextEngine,
         planner: ToolPlanner,
         confirmation_store: ConfirmationStore | None = None,
+        learning_service: Any | None = None,
     ) -> None:
         self.router = router
         self.registry = registry
         self.context_engine = context_engine
         self.planner = planner
         self.confirmation_store = confirmation_store or ConfirmationStore()
+        if learning_service is None:
+            from .learning import PostTaskLearningService
+            self.learning_service = PostTaskLearningService(
+                memory_store=getattr(self.context_engine, "memory_store", None),
+                personal_store=getattr(getattr(self.context_engine, "personal_model_service", None), "store", None),
+            )
+        else:
+            self.learning_service = learning_service
 
     @staticmethod
     def _format_confirmation_summary(tool_name: str, tool_args: dict[str, Any]) -> str:
@@ -592,5 +601,24 @@ class AgentOrchestrator:
         if last_confirmation_id is not None:
             result_payload["confirmation_required"] = True
             result_payload["confirmation_id"] = last_confirmation_id
+
+        # ── LEARN STAGE: Complete the original core loop ─────────────────────
+        # UNDERSTAND → REMEMBER → PLAN → ACT → OBSERVE → LEARN → repeat
+        learning_result = None
+        if self.learning_service:
+            try:
+                learning_result = self.learning_service.learn_from_turn(
+                    user_objective=user_message,
+                    steps=steps,
+                    observations=observations,
+                    final_answer=final_answer,
+                    session_id=session_id,
+                    confirmation_required=bool(last_confirmation_id is not None),
+                )
+            except Exception:
+                pass
+
+        if learning_result:
+            result_payload["learning"] = learning_result
 
         return result_payload

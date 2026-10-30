@@ -326,6 +326,65 @@ class TestListDirectoryConfinement(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(PermissionError):
             await ListDirectoryTool().execute("/etc")
 
+    async def test_list_directory_filters_protected_files_and_symlinks(self):
+        """list_directory must never disclose protected files, credentials, or escape symlinks."""
+        ws = _get_workspace_root()
+        test_dir = ws / "_test_protected_listing"
+        test_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            # 1. Normal safe files and dirs (MUST be visible)
+            safe_file = test_dir / "safe_document.txt"
+            safe_file.write_text("safe content", encoding="utf-8")
+            safe_subdir = test_dir / "safe_notes"
+            safe_subdir.mkdir(exist_ok=True)
+
+            # 2. Protected files (MUST be filtered out)
+            (test_dir / ".env").write_text("SECRET=1", encoding="utf-8")
+            (test_dir / ".env.production").write_text("PROD_SECRET=1", encoding="utf-8")
+            (test_dir / "credentials.json").write_text("{}", encoding="utf-8")
+            (test_dir / "audit.log").write_text("logs", encoding="utf-8")
+            (test_dir / "orion.db").write_text("db", encoding="utf-8")
+            (test_dir / "private.key").write_text("key", encoding="utf-8")
+            (test_dir / "server.pem").write_text("pem", encoding="utf-8")
+
+            # 3. Symlink pointing to protected file (MUST be filtered out)
+            symlink_to_env = test_dir / "symlink_env.txt"
+            try:
+                symlink_to_env.symlink_to(test_dir / ".env")
+            except OSError:
+                pass
+
+            # 4. Symlink escaping workspace (MUST be filtered out)
+            symlink_escape = test_dir / "symlink_escape"
+            try:
+                symlink_escape.symlink_to(Path("/etc"))
+            except OSError:
+                pass
+
+            tool = ListDirectoryTool()
+            res = await tool.execute("_test_protected_listing")
+            entry_names = {e["name"] for e in res["entries"]}
+
+            # Normal files and dirs remain visible
+            self.assertIn("safe_document.txt", entry_names)
+            self.assertIn("safe_notes", entry_names)
+
+            # Protected files must NOT be in entry_names
+            self.assertNotIn(".env", entry_names)
+            self.assertNotIn(".env.production", entry_names)
+            self.assertNotIn("credentials.json", entry_names)
+            self.assertNotIn("audit.log", entry_names)
+            self.assertNotIn("orion.db", entry_names)
+            self.assertNotIn("private.key", entry_names)
+            self.assertNotIn("server.pem", entry_names)
+            self.assertNotIn("symlink_env.txt", entry_names)
+            self.assertNotIn("symlink_escape", entry_names)
+
+        finally:
+            import shutil
+            if test_dir.exists():
+                shutil.rmtree(test_dir, ignore_errors=True)
+
 
 # ===========================================================================
 # Goal B — Command execution safety

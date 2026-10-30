@@ -1,8 +1,43 @@
+from pathlib import Path
 from typing import Any
 
 from .base import Tool
 from .permissions import Permission
 from .workspace import _get_workspace_root, is_protected_file, is_source_path, safe_path
+
+
+def _is_entry_protected_or_restricted(entry: Path, workspace: Path) -> bool:
+    """
+    Check whether a directory entry (file, directory, or symlink) should be
+    filtered out to prevent disclosure of protected files, source code, or secrets.
+    """
+    # 1. Direct name / path check (pre-resolution, catches .env, credentials.json, id_rsa, etc.)
+    if is_protected_file(entry):
+        return True
+
+    # 2. Symlink handling: inspect target to prevent symlink target disclosure
+    if entry.is_symlink():
+        try:
+            resolved = entry.resolve()
+            # If symlink points outside workspace, hide it
+            try:
+                resolved.relative_to(workspace)
+            except ValueError:
+                return True
+            if is_protected_file(resolved) or is_source_path(resolved):
+                return True
+        except (OSError, RuntimeError):
+            # Broken, unresolvable, or circular symlink
+            return True
+    else:
+        try:
+            resolved = entry.resolve()
+            if is_protected_file(resolved) or is_source_path(resolved):
+                return True
+        except (OSError, RuntimeError):
+            return True
+
+    return False
 
 
 class ListDirectoryTool(Tool):
@@ -26,9 +61,13 @@ class ListDirectoryTool(Tool):
                 f"Path is not a directory: {path}"
             )
 
+        workspace = _get_workspace_root()
         entries = []
 
         for entry in sorted(directory.iterdir(), key=lambda item: item.name.lower()):
+            if _is_entry_protected_or_restricted(entry, workspace):
+                continue
+
             entries.append(
                 {
                     "name": entry.name,

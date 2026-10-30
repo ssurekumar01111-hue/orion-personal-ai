@@ -17,13 +17,29 @@ from .store import MemoryStore, _contains_secret, _contains_sensitive_personal_i
 EXPLICIT_PATTERNS = [
     # "For this project, our internal codename is BLUE ORBIT 47. Remember it."
     re.compile(r"^(.*?)[,;.]?\s*(?:please\s+)?remember\s+(?:it|this|that)[.!]?$", re.IGNORECASE),
-    # "Remember that our internal codename is BLUE ORBIT 47"
-    re.compile(r"^(?:please\s+)?remember(?:\s+that|\s*:|\s+this)?\s*[:,-]?\s*(.+)$", re.IGNORECASE),
-    # "Don't forget that ..."
-    re.compile(r"^(?:don't|do not)\s+forget(?:\s+that)?\s*[:,-]?\s*(.+)$", re.IGNORECASE),
-    # "Note that ..." / "Keep in mind that ..."
-    re.compile(r"^(?:note\s+that|keep in mind\s+that)\s*[:,-]?\s*(.+)$", re.IGNORECASE),
+    # "Remember this for future conversations: My project codename is BLUE ORBIT 47"
+    # "Please remember for future sessions: I prefer concise technical explanations"
+    # "Remember this: My project uses FastAPI and React"
+    # "Going forward, remember that I prefer written updates"
+    re.compile(
+        r"^(?:going\s+forward\s*[,;]?\s*)?(?:please\s+)?(?:remember(?:\s+(?:this|that|it))?|don't\s+forget(?:\s+that)?|do\s+not\s+forget(?:\s+that)?|note\s+that|keep\s+in\s+mind(?:\s+that)?)(?:\s+(?:for\s+future\s+(?:conversations|sessions|reference|interactions|chats)))?\s*[:,-]?\s*(.+)$",
+        re.IGNORECASE,
+    ),
 ]
+
+
+def _clean_explicit_fact(raw_fact: str) -> str:
+    """Strip conversation meta-preambles from extracted explicit memory facts."""
+    cleaned = raw_fact.strip()
+    cleaned = re.sub(
+        r"^(?:for\s+future\s+(?:conversations|sessions|reference|interactions|chats)\s*[:,-]?\s*)",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"^(?:going\s+forward\s*[,:-]?\s*)", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^(?:that\s+)", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.rstrip(".!? ").strip()
 
 # Patterns for automatic candidate extraction (conservative)
 PREFERENCE_PATTERN = re.compile(
@@ -107,8 +123,8 @@ class MemoryExtractionService:
                 break
 
         if explicit_match:
-            # Clean trailing punctuation
-            clean_fact = explicit_match.rstrip(".!? ")
+            # Clean trailing punctuation and instruction preambles
+            clean_fact = _clean_explicit_fact(explicit_match)
             if len(clean_fact) >= 3 and not _contains_secret(clean_fact):
                 category = self._determine_category(clean_fact)
                 record = self.memory_store.remember(

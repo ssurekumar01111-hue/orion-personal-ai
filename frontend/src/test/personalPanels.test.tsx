@@ -288,5 +288,54 @@ describe('Personal Model Backend API and UI Panels', () => {
       expect(screen.getByText('User prefers dark console interface.')).toBeInTheDocument();
       expect(screen.getByText('preference')).toBeInTheDocument();
     });
+
+    it('renders manual refresh button and invokes onRefresh callback', () => {
+      const handleRefresh = vi.fn();
+      render(<MemoryPanel memories={mockMemories} onRefresh={handleRefresh} />);
+
+      const refreshBtn = screen.getByTestId('refresh-memory-button');
+      expect(refreshBtn).toBeInTheDocument();
+      expect(screen.getByText('Refresh')).toBeInTheDocument();
+
+      fireEvent.click(refreshBtn);
+      expect(handleRefresh).toHaveBeenCalledTimes(1);
+    });
+
+    it('disables refresh button and displays loading indicator when isLoading is true', () => {
+      const handleRefresh = vi.fn();
+      render(<MemoryPanel memories={mockMemories} onRefresh={handleRefresh} isLoading={true} />);
+
+      const refreshBtn = screen.getByTestId('refresh-memory-button');
+      expect(refreshBtn).toBeDisabled();
+      expect(screen.getByText('Refreshing...')).toBeInTheDocument();
+    });
+
+    it('displays error banner when error prop is provided', () => {
+      render(<MemoryPanel memories={mockMemories} error="502 Bad Gateway" />);
+      expect(screen.getByTestId('memory-error')).toBeInTheDocument();
+      expect(screen.getByText(/502 Bad Gateway/i)).toBeInTheDocument();
+    });
+
+    it('displays loading state when empty and isLoading is true', () => {
+      render(<MemoryPanel memories={[]} isLoading={true} />);
+      expect(screen.getByText('Loading episodic memories...')).toBeInTheDocument();
+    });
+
+    it('filters memories by keyword search and category selection', () => {
+      const multiMemories: EpisodicMemory[] = [
+        { id: 1, content: 'User prefers Python for data analysis.', category: 'preference', importance: 4 },
+        { id: 2, content: 'Project codename is BLUE ORBIT 47.', category: 'project', importance: 5 },
+      ];
+
+      render(<MemoryPanel memories={multiMemories} />);
+      expect(screen.getByText('User prefers Python for data analysis.')).toBeInTheDocument();
+      expect(screen.getByText('Project codename is BLUE ORBIT 47.')).toBeInTheDocument();
+
+      const searchInput = screen.getByPlaceholderText('Filter memories by keyword...');
+      fireEvent.change(searchInput, { target: { value: 'BLUE ORBIT' } });
+
+      expect(screen.getByText('Project codename is BLUE ORBIT 47.')).toBeInTheDocument();
+      expect(screen.queryByText('User prefers Python for data analysis.')).not.toBeInTheDocument();
+    });
   });
 });

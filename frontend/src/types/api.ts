@@ -21,6 +21,7 @@ export interface ChatResponsePayload {
   model: string;
   response: string;
   context?: ContextUsageInfo;
+  extracted_memories?: Array<Record<string, unknown>>;
 }
 
 export interface AgentRunResponsePayload {

@@ -221,3 +221,229 @@ class TestMemoryExtraction(unittest.TestCase):
         )
         self.assertEqual(len(res2), 1)
         self.assertEqual(res2[0]["category"], "project")
+
+    def test_exact_blue_orbit_47_extraction_without_preamble(self):
+        """Test exact wording: 'Remember this for future conversations: My project codename is BLUE ORBIT 47. It is a personal AI research project.'"""
+        extracted = self.service.extract_from_conversation(
+            "Remember this for future conversations: My project codename is BLUE ORBIT 47. It is a personal AI research project.",
+            session_id="session-blue-orbit",
+        )
+        self.assertEqual(len(extracted), 1)
+        mem = extracted[0]
+        self.assertEqual(
+            mem["content"],
+            "My project codename is BLUE ORBIT 47. It is a personal AI research project",
+        )
+        self.assertNotIn("for future conversations", mem["content"].lower())
+        self.assertEqual(mem["category"], "project")
+        self.assertEqual(mem["importance"], 5)
+        self.assertEqual(mem["source_session"], "session-blue-orbit")
+
+    def test_future_session_qualifier_removal(self):
+        """Test: 'Please remember for future sessions: I prefer concise technical explanations.'"""
+        extracted = self.service.extract_from_conversation(
+            "Please remember for future sessions: I prefer concise technical explanations.",
+            session_id="session-concise",
+        )
+        self.assertEqual(len(extracted), 1)
+        self.assertEqual(extracted[0]["content"], "I prefer concise technical explanations")
+        self.assertNotIn("future sessions", extracted[0]["content"].lower())
+        self.assertEqual(extracted[0]["category"], "preference")
+
+    def test_going_forward_remember_removal(self):
+        """Test: 'Going forward, remember that I prefer written updates.'"""
+        extracted = self.service.extract_from_conversation(
+            "Going forward, remember that I prefer written updates.",
+            session_id="session-updates",
+        )
+        self.assertEqual(len(extracted), 1)
+        self.assertEqual(extracted[0]["content"], "I prefer written updates")
+        self.assertNotIn("going forward", extracted[0]["content"].lower())
+
+    def test_relevance_scoring_excludes_unrelated_high_importance_memories(self):
+        """Fix D: Unrelated high-importance memories must NOT be retrieved merely because of importance."""
+        self.store.remember(
+            "Orion utilizes Nebius Token Factory for Nemotron LLM inference with bounded multi-step tool execution.",
+            category="architecture",
+            importance=5,
+        )
+        self.store.remember(
+            "Workspace operations are strictly confined to the dedicated workspace directory.",
+            category="security",
+            importance=5,
+        )
+
+        # Completely unrelated query
+        results = self.store.recall("What is your favorite recipe for homemade pasta?")
+        self.assertEqual(len(results), 0)
+
+    def test_relevance_scoring_retrieves_matching_high_and_lower_importance_memories(self):
+        """Fix D: Directly matching memories remain eligible regardless of importance, and ranked sensibly."""
+        mem_high = self.store.remember(
+            "My project codename is BLUE ORBIT 47",
+            category="project",
+            importance=5,
+        )
+        mem_low = self.store.remember(
+            "User prefers dark console interface",
+            category="preference",
+            importance=1,
+        )
+
+        # High-importance match
+        results_high = self.store.recall("What is my project codename?")
+        self.assertTrue(len(results_high) > 0)
+        self.assertEqual(results_high[0]["id"], mem_high["id"])
+
+        # Low-importance match
+        results_low = self.store.recall("User preference for terminal console")
+        self.assertTrue(len(results_low) > 0)
+        self.assertEqual(results_low[0]["id"], mem_low["id"])
+
+    def test_cross_session_retrieval_across_distinct_sessions(self):
+        """Cross-session retrieval: Session 1 stores memory; Session 2 context engine recalls it."""
+        session_store = SessionStore()
+        s1 = session_store.create("Session 1")
+        s2 = session_store.create("Session 2")
+
+        # Session 1 extracts memory
+        self.service.extract_from_conversation(
+            "Remember this for future conversations: My project codename is BLUE ORBIT 47. It is a personal AI research project.",
+            session_id=s1["id"],
+        )
+
+        # Session 2 context retrieval
+        engine = ContextEngine(memory_store=self.store, session_store=session_store)
+        ctx = engine.build_context("What was my project codename?", session_id=s2["id"])
+
+        self.assertTrue(len(ctx["memories"]) > 0)
+        self.assertIn("BLUE ORBIT 47", ctx["memories"][0]["content"])
+
+    def test_system_prompt_accurately_describes_episodic_memory(self):
+        """Fix B: System prompt must describe cross-session episodic memory and forbid disclaiming memory."""
+        engine = ContextEngine(memory_store=self.store, session_store=SessionStore())
+        prompt = engine.build_system_prompt(memories=[])
+
+        self.assertIn("structured episodic memory that can be retrieved across separate conversation sessions", prompt)
+        self.assertIn("Do not claim that you cannot remember or retain information across separate conversations", prompt)
+        self.assertNotIn("session-only", prompt.lower())
+
+    @patch("app.main.router.chat")
+    def test_chat_acknowledgement_synchronization_on_successful_persistence(self, mock_chat):
+        """Fix B: When memory is persisted, chat response accurately acknowledges it and strips disclaimers."""
+        mock_chat.return_value = {
+            "choices": [{
+                "message": {
+                    "content": "I've noted your project codename as BLUE ORBIT 47 for our current conversation. Per my operational constraints, I don't have persistent long-term memory across separate conversations—I can only retain and reference information provided within the active session or defined in my initial context (personal model/episodic memory)."
+                }
+            }],
+            "model": "test-model",
+        }
+
+        client = TestClient(app)
+        res = client.post(
+            "/api/chat",
+            json={
+                "message": "Remember this for future conversations: My project codename is BLUE ORBIT 47. It is a personal AI research project."
+            },
+        )
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+
+        # Memory was extracted
+        self.assertTrue(len(data["extracted_memories"]) > 0)
+        self.assertEqual(
+            data["extracted_memories"][0]["content"],
+            "My project codename is BLUE ORBIT 47. It is a personal AI research project",
+        )
+
+        # Response contains accurate acknowledgement and stripped disclaimer
+        self.assertIn("saved this to persistent episodic memory", data["response"])
+        self.assertNotIn("don't have persistent long-term memory", data["response"])
+
+    @patch("app.main.router.chat")
+    def test_chat_no_acknowledgement_when_no_persistence(self, mock_chat):
+        """Fix B: When no memory is extracted, response does not invent a saved confirmation."""
+        mock_chat.return_value = {
+            "choices": [{"message": {"content": "Paris is the capital of France."}}],
+            "model": "test-model",
+        }
+
+        client = TestClient(app)
+        res = client.post(
+            "/api/chat",
+            json={"message": "What is the capital of France?"},
+        )
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+
+        self.assertEqual(len(data["extracted_memories"]), 0)
+        self.assertNotIn("saved this to persistent episodic memory", data["response"])
+        self.assertIn("Paris is the capital of France.", data["response"])
+
+    @patch("app.main.router.chat")
+    def test_regression_false_save_acknowledgement_stripped_when_no_persistence(self, mock_chat):
+        """Regression: False save acknowledgement must be stripped when no memory was persisted while preserving unrelated sentences."""
+        mock_chat.return_value = {
+            "choices": [{"message": {"content": "I have saved this to your persistent memory. Paris is the capital of France."}}],
+            "model": "test-model",
+        }
+
+        client = TestClient(app)
+        res = client.post(
+            "/api/chat",
+            json={"message": "What is the capital of France?"},
+        )
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+
+        self.assertEqual(len(data["extracted_memories"]), 0)
+        self.assertNotIn("saved this to", data["response"].lower())
+        self.assertEqual(data["response"], "Paris is the capital of France.")
+
+    @patch("app.main.router.chat")
+    def test_false_save_acknowledgement_variations_stripped(self, mock_chat):
+        """Verify 'I have saved', 'I\'ve saved', and 'I saved' are all stripped when no memory was persisted."""
+        client = TestClient(app)
+        variations = [
+            ("I have saved this to your persistent memory. Paris is the capital of France.", "Paris is the capital of France."),
+            ("I've saved this to your persistent memory. Paris is the capital of France.", "Paris is the capital of France."),
+            ("I saved this to your persistent memory. Paris is the capital of France.", "Paris is the capital of France."),
+        ]
+        for mock_content, expected_content in variations:
+            mock_chat.return_value = {
+                "choices": [{"message": {"content": mock_content}}],
+                "model": "test-model",
+            }
+            res = client.post(
+                "/api/chat",
+                json={"message": "What is the capital of France?"},
+            )
+            self.assertEqual(res.status_code, 200)
+            data = res.json()
+            self.assertEqual(len(data["extracted_memories"]), 0)
+            self.assertEqual(data["response"], expected_content)
+
+    def test_category_matching_exact_token_only(self):
+        """Confirm category matching does not match 'go' against 'goal', 'pro' against 'project', or 'act' against 'architecture', but exact matches work."""
+        self.store.remember("Achieve high performance milestones.", category="goal")
+        self.store.remember("Manage the new enterprise rollout.", category="project")
+        self.store.remember("Design microservices with clear boundaries.", category="architecture")
+
+        # Inexact substrings must not match
+        self.assertEqual(self.store.recall("go"), [])
+        self.assertEqual(self.store.recall("pro"), [])
+        self.assertEqual(self.store.recall("act"), [])
+
+        # Valid exact category matches must work
+        goal_matches = self.store.recall("goal")
+        self.assertEqual(len(goal_matches), 1)
+        self.assertEqual(goal_matches[0]["category"], "goal")
+
+        project_matches = self.store.recall("project")
+        self.assertEqual(len(project_matches), 1)
+        self.assertEqual(project_matches[0]["category"], "project")
+
+        arch_matches = self.store.recall("architecture")
+        self.assertEqual(len(arch_matches), 1)
+        self.assertEqual(arch_matches[0]["category"], "architecture")

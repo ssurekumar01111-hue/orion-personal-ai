@@ -66,6 +66,42 @@ export const App: React.FC = () => {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [skills, setSkills] = useState<Skill[]>([]);
   const [memories, setMemories] = useState<EpisodicMemory[]>([]);
+  const [isMemoriesLoading, setIsMemoriesLoading] = useState<boolean>(false);
+  const [memoriesError, setMemoriesError] = useState<string | null>(null);
+
+  // Dedicated helper to refresh episodic memories
+  const refreshMemories = useCallback(async (limit: number = 20) => {
+    setIsMemoriesLoading(true);
+    setMemoriesError(null);
+    try {
+      const latest = await getRecentMemories(limit);
+      if (Array.isArray(latest)) {
+        setMemories((prev) => {
+          // Merge without duplicates based on memory id, keeping latest data
+          const map = new Map<number, EpisodicMemory>();
+          for (const m of latest) {
+            map.set(m.id, m);
+          }
+          for (const m of prev) {
+            if (!map.has(m.id)) {
+              map.set(m.id, m);
+            }
+          }
+          return Array.from(map.values()).sort((a, b) => {
+            const tA = a.created_at ? new Date(a.created_at).getTime() : 0;
+            const tB = b.created_at ? new Date(b.created_at).getTime() : 0;
+            return tB - tA;
+          });
+        });
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to refresh episodic memories.';
+      console.warn('Could not refresh episodic memories:', err);
+      setMemoriesError(msg);
+    } finally {
+      setIsMemoriesLoading(false);
+    }
+  }, []);
 
   // Initial data loading
   const loadInitialData = useCallback(async () => {
@@ -128,6 +164,13 @@ export const App: React.FC = () => {
       loadInitialData();
     }
   }, [isAuthenticated, loadInitialData]);
+
+  // Automatically refresh episodic memory whenever navigating to memory view
+  useEffect(() => {
+    if (activeView === 'memory' && isAuthenticated) {
+      refreshMemories(20).catch(() => {});
+    }
+  }, [activeView, isAuthenticated, refreshMemories]);
 
   const handleSignOut = () => {
     setDemoKey(null);
@@ -222,6 +265,11 @@ export const App: React.FC = () => {
         };
 
         setMessages((prev) => [...prev, assistantMsg]);
+
+        // If memories were extracted in chat mode, refresh episodic memory state
+        if (res.extracted_memories && res.extracted_memories.length > 0) {
+          refreshMemories(20).catch(() => {});
+        }
       } else {
         // Agent mode (POST /api/agent/run)
         const res = await runAgent({
@@ -447,6 +495,9 @@ export const App: React.FC = () => {
             <div className="flex-1 overflow-y-auto">
               <MemoryPanel
                 memories={memories}
+                isLoading={isMemoriesLoading}
+                error={memoriesError}
+                onRefresh={() => refreshMemories(20)}
                 onDeleteMemory={async (memId) => {
                   const ok = await deleteMemory(memId);
                   if (ok) {

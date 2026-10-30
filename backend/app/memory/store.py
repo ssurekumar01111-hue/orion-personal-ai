@@ -302,6 +302,22 @@ class MemoryStore:
             cat_norm = _normalize_text(mem_dict.get("category", ""))
             content_tokens = set(re.findall(r"[a-z0-9_\-]+", content_norm))
 
+            cat_tokens = set(re.findall(r"[a-z0-9_\-]+", cat_norm))
+            for tok in list(cat_tokens):
+                for part in re.split(r"[_\-]+", tok):
+                    if part:
+                        cat_tokens.add(part)
+
+            # Check for meaningful relevance signal before applying score / importance weighting
+            is_substring = (norm_query in content_norm) or (clean_query.lower() in content_norm)
+            matched_keywords = [kw for kw in query_keywords if kw in content_tokens or kw in content_norm]
+            cat_matches = [kw for kw in query_keywords if kw in cat_tokens]
+            is_project_match = (project_id is not None and mem_dict.get("project_id") == project_id)
+
+            if not (is_substring or matched_keywords or cat_matches or is_project_match):
+                # Importance alone must not cause completely unrelated memories to be retrieved
+                continue
+
             score = 0.0
 
             # 1. Exact substring match in content
@@ -311,19 +327,18 @@ class MemoryStore:
                 score += 8.0
 
             # 2. Token overlap
-            matched_keywords = [kw for kw in query_keywords if kw in content_tokens or kw in content_norm]
             if matched_keywords:
                 score += len(matched_keywords) * 3.0
 
             # 3. Category match
-            if any(kw in cat_norm for kw in query_keywords):
+            if cat_matches:
                 score += 2.0
 
-            # 4. Importance weighting
+            # 4. Importance weighting (applied only when a relevance signal is present)
             score += mem_dict.get("importance", 3) * 0.5
 
             # 5. Project alignment
-            if project_id is not None and mem_dict.get("project_id") == project_id:
+            if is_project_match:
                 score += 3.0
 
             if score > 1.5:  # meaningful relevance threshold
@@ -344,11 +359,11 @@ class MemoryStore:
                 SELECT *
                 FROM memories
                 WHERE content LIKE ?
-                   OR category LIKE ?
+                   OR lower(category) = lower(?)
                 ORDER BY importance DESC, updated_at DESC
                 LIMIT ?
                 """,
-                (pattern, pattern, limit),
+                (pattern, clean_query.strip(), limit),
             ).fetchall()
         return [dict(r) for r in fallback_rows]
 

@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -299,6 +300,42 @@ async def delete_session(session_id: str):
     }
 
 
+def _synchronize_memory_acknowledgement(
+    response_text: str,
+    extracted: list[dict],
+    user_message: str,
+) -> str:
+    cleaned = response_text.strip()
+    if extracted:
+        # Strip generic LLM disclaimers claiming lack of cross-session persistent memory
+        disclaimer_pat = re.compile(
+            r"(?:per my operational constraints,?\s*)?(?:i\s+(?:don't|do not)\s+have\s+persistent\s+long-term\s+memory[^\n.]*[\n.]?|i\s+can\s+only\s+retain\s+and\s+reference\s+information\s+provided\s+within\s+the\s+active\s+session[^\n.]*[\n.]?)",
+            re.IGNORECASE,
+        )
+        cleaned = disclaimer_pat.sub("", cleaned).strip()
+
+        # Check if response already has an accurate persistence acknowledgement
+        already_acknowledged = bool(
+            re.search(
+                r"\b(?:saved|stored|recorded|persisted)\b.*\b(?:persistent|episodic\s+memory|future\s+conversations|future\s+sessions)\b",
+                cleaned,
+                re.IGNORECASE,
+            )
+        )
+        if not already_acknowledged:
+            ack = "I have saved this to persistent episodic memory for future conversations."
+            cleaned = f"{cleaned}\n\n{ack}" if cleaned else ack
+    else:
+        # If extraction was not performed or failed/rejected, ensure model does not invent a save confirmation
+        hallucinated_save = re.compile(
+            r"\b(?:i(?:\s+have|'ve|’ve)?\s+(?:saved|stored|recorded|persisted|added)\s+(?:this|that|it)\s+to\s+(?:your\s+)?(?:persistent\s+)?(?:episodic\s+)?memory[^\n.!?]*[\n.!?]?)\s*",
+            re.IGNORECASE,
+        )
+        cleaned = hallucinated_save.sub("", cleaned).strip()
+
+    return cleaned
+
+
 @app.post("/api/chat", dependencies=[Depends(check_expensive_rate_limit)])
 async def chat(request: ChatRequest):
     try:
@@ -341,16 +378,22 @@ async def chat(request: ChatRequest):
         assistant_message = choice["message"]
         response_text = assistant_message.get("content") or ""
 
-        sessions.add_message(
-            session_id=session_id,
-            role="assistant",
-            content=response_text,
-        )
-
         # Conversational memory extraction (Feature 1)
         extracted = extraction_service.extract_from_conversation(
             user_message=request.message,
             session_id=session_id,
+        )
+
+        response_text = _synchronize_memory_acknowledgement(
+            response_text=response_text,
+            extracted=extracted,
+            user_message=request.message,
+        )
+
+        sessions.add_message(
+            session_id=session_id,
+            role="assistant",
+            content=response_text,
         )
 
         return {

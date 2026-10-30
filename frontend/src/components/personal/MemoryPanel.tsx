@@ -1,17 +1,23 @@
 import React, { useState } from 'react';
 import { EpisodicMemory } from '../../types/personal';
 import { Badge } from '../common/Badge';
-import { BrainCircuit, Star, Calendar, Trash2, Tag, Layers } from 'lucide-react';
+import { BrainCircuit, Star, Calendar, Trash2, Tag, Layers, RefreshCw } from 'lucide-react';
 
 interface MemoryPanelProps {
   memories: EpisodicMemory[];
   onDeleteMemory?: (memoryId: number) => void;
+  onRefresh?: () => Promise<void> | void;
+  isLoading?: boolean;
+  error?: string | null;
   className?: string;
 }
 
 export const MemoryPanel: React.FC<MemoryPanelProps> = ({
   memories,
   onDeleteMemory,
+  onRefresh,
+  isLoading = false,
+  error = null,
   className = '',
 }) => {
   const [filterCategory, setFilterCategory] = useState<string>('all');
@@ -49,9 +55,31 @@ export const MemoryPanel: React.FC<MemoryPanelProps> = ({
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {onRefresh && (
+            <button
+              type="button"
+              onClick={onRefresh}
+              disabled={isLoading}
+              title="Refresh memories"
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-mono bg-orion-900 border border-slate-800 text-slate-300 hover:text-cyan-400 hover:border-cyan-500/40 transition-colors disabled:opacity-50"
+              data-testid="refresh-memory-button"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin text-cyan-400' : ''}`} />
+              <span>{isLoading ? 'Refreshing...' : 'Refresh'}</span>
+            </button>
+          )}
           <Badge variant="cyan">{memories.length} Memories</Badge>
         </div>
       </div>
+
+      {error && (
+        <div
+          className="p-3 rounded-lg border border-rose-800/80 bg-rose-950/40 text-rose-300 text-xs flex items-center justify-between"
+          data-testid="memory-error"
+        >
+          <span>Error loading memories: {error}</span>
+        </div>
+      )}
 
       {/* Search and Category Filters */}
       <div className="flex flex-wrap items-center justify-between gap-3 bg-orion-900/60 p-3 rounded-xl border border-slate-800/80">
@@ -152,7 +180,9 @@ export const MemoryPanel: React.FC<MemoryPanelProps> = ({
 
         {filteredMemories.length === 0 && (
           <div className="p-12 text-center border border-dashed border-slate-800 rounded-xl text-slate-400 text-sm">
-            {memories.length === 0
+            {isLoading
+              ? 'Loading episodic memories...'
+              : memories.length === 0
               ? 'No memories recorded yet. Tell Orion facts or preferences in conversation to learn them.'
               : 'No memories match your filter criteria.'}
           </div>

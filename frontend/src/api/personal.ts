@@ -31,13 +31,8 @@ export async function getSkills(limit: number = 50): Promise<Skill[]> {
  * Consumes: GET /api/memory/recent
  */
 export async function getRecentMemories(limit: number = 20): Promise<EpisodicMemory[]> {
-  try {
-    const data = await request<{ memories: EpisodicMemory[] }>(`/api/memory/recent?limit=${limit}`);
-    return data.memories || [];
-  } catch (err) {
-    console.warn('Failed to fetch memories from /api/memory/recent:', err);
-    return [];
-  }
+  const data = await request<{ memories: EpisodicMemory[] }>(`/api/memory/recent?limit=${limit}`);
+  return data.memories || [];
 }
 
 /**
